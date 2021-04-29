@@ -339,6 +339,14 @@ def get_environment_var(environment, name):
             return entry["value"]
     return None
 
+def get_environment_var_as_list(environment, name):
+    entry = get_environment_var(environment, name)
+    if entry:
+        if "," in entry:
+            return entry.split(",")
+        return [ entry ]
+    return None
+
 
 def extract_name_from_arn(arn):
     return arn.split(":")[5].split("/")[-1]
@@ -351,7 +359,7 @@ def extract_task_version(taskDefinitionArn):
 def extract_path_interval(env_variable):
     path_interval = {}
     if env_variable:
-        for lst in env_variable.split(","):
+        for lst in env_variable:
             if ":" in lst:
                 pi = lst.split(":")
                 if re.search("(15s|30s|1m|5m)", pi[0]):
@@ -378,7 +386,7 @@ def task_info_to_targets(task_info):
         prometheus_enabled = get_environment_var(
             container_definition["environment"], "PROMETHEUS"
         )
-        metrics_path = get_environment_var(
+        default_metrics_path = get_environment_var_as_list(
             container_definition["environment"], "PROMETHEUS_ENDPOINT"
         )
         nolabels = get_environment_var(
@@ -386,12 +394,14 @@ def task_info_to_targets(task_info):
         )
         if nolabels != "true":
             nolabels = None
-        prometheus_port = get_environment_var(
+        prometheus_port = get_environment_var_as_list(
             container_definition["environment"], "PROMETHEUS_PORT"
         )
-        prometheus_container_port = get_environment_var(
+
+        prometheus_container_port = get_environment_var_as_list(
             container_definition["environment"], "PROMETHEUS_CONTAINER_PORT"
         )
+
         running_containers = filter(
             lambda container: container["name"] == container_definition["name"],
             task["containers"],
@@ -413,46 +423,18 @@ def task_info_to_targets(task_info):
                 and len(container_definition["portMappings"]) > 0
             )
 
-            if prometheus_port:
-                first_port = prometheus_port
-            elif task_definition.get("networkMode") in ("host", "awsvpc"):
-                if has_host_port_mapping:
-                    first_port = str(
-                        container_definition["portMappings"][0]["hostPort"]
-                    )
-                else:
-                    first_port = "80"
-            elif prometheus_container_port:
-                binding_by_container_port = [
-                    c
-                    for c in container["networkBindings"]
-                    if str(c["containerPort"]) == prometheus_container_port
-                ]
-                if binding_by_container_port:
-                    first_port = str(binding_by_container_port[0]["hostPort"])
-                else:
-                    log(
-                        task["group"]
-                        + ":"
-                        + container_definition["name"]
-                        + " does not expose port matching PROMETHEUS_CONTAINER_PORT, omitting"
-                    )
-                    return []
-            else:
-                first_port = str(container["networkBindings"][0]["hostPort"])
-
             if task_definition.get("networkMode") == "awsvpc":
                 interface_ip = container["networkInterfaces"][0]["privateIpv4Address"]
             else:
                 interface_ip = task_info.ec2_instance["PrivateIpAddress"]
 
+            p_instance = None
             if nolabels:
                 p_instance = ecs_task_name
                 ecs_task_id = (
                     ecs_task_version
                 ) = ecs_container_id = ecs_cluster_name = ec2_instance_id = None
             else:
-                p_instance = interface_ip + ":" + first_port
                 ecs_task_id = extract_name_from_arn(task["taskArn"])
                 ecs_task_version = extract_task_version(task["taskDefinitionArn"])
                 ecs_cluster_name = extract_name_from_arn(task["clusterArn"])
@@ -462,21 +444,81 @@ def task_info_to_targets(task_info):
                     ec2_instance_id = task_info.container_instance["ec2InstanceId"]
                     ecs_container_id = extract_name_from_arn(container["containerArn"])
 
-            targets += [
-                Target(
-                    ip=interface_ip,
-                    port=first_port,
-                    metrics_path=metrics_path,
-                    p_instance=p_instance,
-                    ecs_task_id=ecs_task_id,
-                    ecs_task_name=ecs_task_name,
-                    ecs_task_version=ecs_task_version,
-                    ecs_container_id=ecs_container_id,
-                    ecs_cluster_name=ecs_cluster_name,
-                    ec2_instance_id=ec2_instance_id,
-                    tags=tags,
-                )
-            ]
+            common_args = { 
+                "ip": interface_ip,
+                "port": "",
+                "metrics_path": "",
+                "p_instance": "",
+                "ecs_task_id": ecs_task_id,
+                "ecs_task_name": ecs_task_name,
+                "ecs_task_version": ecs_task_version,
+                "ecs_container_id": ecs_container_id,
+                "ecs_cluster_name": ecs_cluster_name,
+                "ec2_instance_id": ec2_instance_id,
+                "tags": tags
+            }
+
+            if prometheus_port:
+                for first_port in prometheus_port:
+                    metrics_path=get_environment_var_as_list(
+                        container_definition["environment"], "PROMETHEUS_ENDPOINT_" + first_port
+                    ) or default_metrics_path
+                    target=Target(**common_args)
+                    target.port=first_port
+                    target.metrics_path=metrics_path
+                    target.p_instance = p_instance or interface_ip + ":" + first_port
+                    targets += [target]
+
+                first_port = None
+
+            elif task_definition.get("networkMode") in ("host", "awsvpc"):
+                if has_host_port_mapping:
+                    first_port = str(
+                        container_definition["portMappings"][0]["hostPort"]
+                    )
+                else:
+                    first_port = "80"
+
+            elif prometheus_container_port:
+                for c_port in prometheus_container_port:
+                    metrics_path=get_environment_var_as_list(
+                        container_definition["environment"], "PROMETHEUS_ENDPOINT_" + c_port
+                    ) or default_metrics_path
+
+                    binding_by_container_port = [
+                        c
+                        for c in container["networkBindings"]
+                        if str(c["containerPort"]) == c_port
+                    ]
+                    if binding_by_container_port:
+                        first_port = str(binding_by_container_port[0]["hostPort"])
+                    else:
+                        log(
+                            task["group"]
+                            + ":"
+                            + container_definition["name"]
+                            + " does not expose port matching PROMETHEUS_CONTAINER_PORT, omitting"
+                        )
+                        return []
+
+                    target=Target(**common_args)
+                    target.port=first_port
+                    target.metrics_path=metrics_path
+                    target.p_instance = p_instance or interface_ip + ":" + first_port
+                    targets += [target]
+
+                first_port = None
+
+            else:
+                first_port = str(container["networkBindings"][0]["hostPort"])
+
+            if first_port:
+                target=Target(**common_args)
+                target.port=first_port
+                target.metrics_path=default_metrics_path
+                target.p_instance = p_instance or interface_ip + ":" + first_port
+                targets += [target]
+
     return targets
 
 

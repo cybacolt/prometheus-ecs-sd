@@ -207,3 +207,80 @@ If `PROMETHEUS_CONTAINER_PORT` is set, it will look at the container host networ
 This is useful when the container port is known, but the hostPort is randomly picked by ECS (by setting hostPort to 0 in the task definition).
 
 If your container uses multiple ports, it's recommended to specify `PROMETHEUS_PORT` (`awsvpc`, `host`) or `PROMETHEUS_CONTAINER_PORT` (`bridge`).
+
+## Multiple exporters
+
+Both `PROMETHEUS_PORT` and `PROMETHEUS_CONTAINER_PORT` also support lists for cases where there are multiple exporters on a container. This requires the port number to be used to discover respective `PROMETHEUS_ENDPOINT_xxx` environment vars.
+
+For example:
+
+```json
+[
+  {"name": "PROMETHEUS_PORT", "value": "9100,9200,9300"},
+  {"name": "PROMETHEUS_ENDPOINT", "value": "1m:/mymetrics,30s:/mymetrics2"},
+  {"name": "PROMETHEUS_ENDPOINT_9100", "value": "5m:/metrics,15s:/stats"},
+  {"name": "PROMETHEUS_ENDPOINT_9200", "value": "1m:/otherstats"}
+]
+```
+
+This would result in 5 targets. The endpoint on port '9300' has its values are populated from `PROMETHEUS_ENDPOINT`, or defaults:
+
+```text
+[
+    {
+        "targets": [
+            "127.0.0.1:9100"
+        ],
+        "labels": {
+            "instance": "127.0.0.1:9100",
+            "job": "my-task-def",
+            "metrics_path": "/metrics",
+            [...]
+        }
+    },
+    {
+        "targets": [
+            "127.0.0.1:9100"
+        ],
+        "labels": {
+            "instance": "127.0.0.1:9100",
+            "job": "my-task-def",
+            "metrics_path": "/stats",
+            [...]
+        }
+    },
+    {
+        "targets": [
+            "127.0.0.1:9200"
+        ],
+        "labels": {
+            "instance": "127.0.0.1:9200",
+            "job": "my-task-def",
+            "metrics_path": "/otherstats",
+            [...]
+        }
+    },
+    {
+        "targets": [
+            "127.0.0.1:9300"
+        ],
+        "labels": {
+            "instance": "127.0.0.1:9300",
+            "job": "my-task-def",
+            "metrics_path": "/mymetrics",
+            [...]
+        }
+    },
+    {
+        "targets": [
+            "127.0.0.1:9300"
+        ],
+        "labels": {
+            "instance": "127.0.0.1:9300",
+            "job": "my-task-def",
+            "metrics_path": "/mymetrics2",
+            [...]
+        }
+    }
+]
+```
